@@ -1,0 +1,4 @@
+name,targetType,longitudeDeg,latitudeDeg,altitudeM,radiusM,widthM,heightM,vertices
+圆形区域,circle,67.55,0,0,30000,,,
+矩形区域,rectangle,66.65,0.15,0,,70000,45000,
+任意多边形,polygon,,,,,,,"[[66.85,-0.75],[67.45,-0.7],[67.55,-0.35],[66.95,-0.3]]"

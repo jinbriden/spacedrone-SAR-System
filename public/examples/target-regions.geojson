@@ -1,0 +1,20 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "id": "geojson-circle",
+      "properties": { "name": "GeoJSON 圆形区域", "radiusM": 30000 },
+      "geometry": { "type": "Point", "coordinates": [67.55, 0, 0] }
+    },
+    {
+      "type": "Feature",
+      "id": "geojson-polygon",
+      "properties": { "name": "GeoJSON 多边形区域" },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[[66.85, -0.75], [67.45, -0.7], [67.55, -0.35], [66.95, -0.3], [66.85, -0.75]]]
+      }
+    }
+  ]
+}

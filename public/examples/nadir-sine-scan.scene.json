@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "kind": "spacedrone.scene",
+  "savedAtUtc": "2026-07-15T00:00:00.000Z",
+  "scene": {
+    "orbit": {
+      "mode": "circular",
+      "earthRotationEnabled": true,
+      "altitudeM": 500000,
+      "direction": 1,
+      "semiMajorAxisM": 6878137,
+      "eccentricity": 0,
+      "argumentOfPeriapsisDeg": 0,
+      "anomalyType": "mean",
+      "initialAnomalyDeg": 0,
+      "inclinationDeg": 97.4,
+      "raanDeg": 0,
+      "initialPhaseDeg": 0,
+      "epochUtc": "2026-07-15T00:00:00.000Z"
+    },
+    "attitude": { "rollDeg": 0, "pitchDeg": 0, "yawDeg": 0 },
+    "antenna": {
+      "name": "ANT-1",
+      "mountOffsetXM": 0,
+      "mountOffsetYM": 0,
+      "mountOffsetZM": 0,
+      "mountRollDeg": 0,
+      "mountPitchDeg": 0,
+      "mountYawDeg": 0,
+      "beamType": "circular",
+      "steeringAzimuthDeg": 0,
+      "steeringElevationDeg": 0,
+      "circularBeamwidthDeg": 6,
+      "azimuthBeamwidthDeg": 4,
+      "elevationBeamwidthDeg": 8,
+      "boundarySamples": 96,
+      "maxDisplayDistanceM": 1500000,
+      "scanMode": "sine",
+      "scanAxis": "azimuth",
+      "scanAmplitudeDeg": 20,
+      "scanPeriodSeconds": 60,
+      "scanPhaseDeg": 0,
+      "maxScanAngleDeg": 60,
+      "beamColor": "#fadb14",
+      "beamOpacity": 0.2
+    },
+    "targets": [
+      {
+        "id": "example-equator-target",
+        "name": "初始星下点",
+        "longitudeDeg": 67.1379,
+        "latitudeDeg": 0,
+        "altitudeM": 0
+      }
+    ],
+    "missionSettings": {
+      "targetSampleStepSeconds": 1,
+      "historyEnabled": true,
+      "historySampleIntervalSeconds": 10,
+      "maxHistoryFootprints": 240
+    },
+    "timelineSettings": { "startSeconds": 0, "endSeconds": 6000 },
+    "displaySettings": {
+      "showGrid": true,
+      "showOrbit": true,
+      "showGroundTrack": true,
+      "showAxes": true,
+      "showBeam": true,
+      "showFootprint": true,
+      "showTargets": true,
+      "showHistory": true,
+      "cameraMode": "free"
+    },
+    "elapsedSeconds": 0,
+    "playbackRate": 100,
+    "targetPasses": {},
+    "coverageHistory": []
+  }
+}
