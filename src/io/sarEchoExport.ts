@@ -1,4 +1,5 @@
 import type { SarEchoResult } from "../workers/sarEcho";
+import { createMatFileV5, matV5ComplexSingle, matV5Double, matV5String } from "./matFileV5";
 
 /** SPDRIQ1: 8-byte magic, uint32 LE JSON length, UTF-8 JSON, 4-byte padding, then interleaved float32 LE I/Q. */
 export function sarEchoToBinary(result: SarEchoResult): ArrayBuffer {
@@ -38,4 +39,35 @@ export function sarEchoToBinary(result: SarEchoResult): ArrayBuffer {
     iq[index * 2 + 1] = result.echo.quadrature[index];
   }
   return buffer;
+}
+
+/** MATLAB Level-5 file with a complex single fast-time-by-pulse echo matrix and engineering metadata. */
+export function sarEchoToMatFile(result: SarEchoResult): ArrayBuffer {
+  const echo = result.echo;
+  const fastTimeSeconds = Float64Array.from({ length: echo.fastTimeSampleCount }, (_, index) =>
+    echo.fastTimeStartSeconds + index * echo.fastTimeStepSeconds,
+  );
+  const scalar = (name: string, value: number) => matV5Double(name, 1, 1, [value]);
+  return createMatFileV5([
+    matV5ComplexSingle("echo_iq", echo.fastTimeSampleCount, echo.pulseCount, echo.inPhase, echo.quadrature),
+    matV5Double("fast_time_s", echo.fastTimeSampleCount, 1, fastTimeSeconds),
+    matV5Double("slow_time_s", echo.pulseCount, 1, echo.slowTimeSeconds),
+    matV5Double("slant_range_m", echo.pulseCount, 1, result.selectedSlantRangeM),
+    scalar("carrier_frequency_hz", result.system.carrierFrequencyHz),
+    scalar("wavelength_m", result.system.wavelengthM),
+    scalar("chirp_bandwidth_hz", result.system.chirpBandwidthHz),
+    scalar("pulse_width_s", result.system.pulseWidthSeconds),
+    scalar("chirp_rate_hz_per_s", echo.chirpRateHzPerSecond),
+    scalar("prf_hz", result.system.prfHz),
+    scalar("sampling_rate_hz", result.system.samplingRateHz),
+    scalar("fast_time_start_s", echo.fastTimeStartSeconds),
+    scalar("fast_time_step_s", echo.fastTimeStepSeconds),
+    scalar("selected_pulse_start_s", result.selectedPulseStartSeconds),
+    scalar("selected_pulse_end_s", result.selectedPulseEndSeconds),
+    scalar("reference_range_m", echo.referenceRangeM),
+    scalar("reference_fast_time_index", echo.referenceFastTimeIndex + 1),
+    scalar("folded_range_ambiguity", echo.foldedRangeAmbiguity ? 1 : 0),
+    matV5String("target_id", result.targetId),
+    matV5String("target_name", result.targetName),
+  ], "complex baseband point-target echo");
 }

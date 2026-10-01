@@ -58,6 +58,38 @@ describe("simulation store scene lifecycle", () => {
     expect(state.companionSatellites).toEqual([]);
   });
 
+  it("未来覆盖预览是可清除的运行时派生数据且加载场景时不保留", () => {
+    const preview = [{ timeSeconds: 30, verticesEcefM: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as [number, number, number][] }];
+    useSimulationStore.getState().setCoveragePreview(preview);
+    expect(useSimulationStore.getState().coveragePreview).toEqual(preview);
+    useSimulationStore.getState().clearCoveragePreview();
+    expect(useSimulationStore.getState().coveragePreview).toEqual([]);
+    useSimulationStore.getState().setCoveragePreview(preview);
+    useSimulationStore.getState().loadScene({
+      orbit: { ...defaultOrbit },
+      attitude: { ...defaultAttitude },
+      antenna: { ...defaultAntenna },
+      targets: [],
+      missionSettings: { ...defaultMissionSettings },
+      timelineSettings: { startSeconds: 0, endSeconds: 6000 },
+      displaySettings: { ...defaultDisplaySettings },
+      elapsedSeconds: 0,
+      playbackRate: 1,
+      targetPasses: {},
+      coverageHistory: [],
+    });
+    expect(useSimulationStore.getState().coveragePreview).toEqual([]);
+  });
+
+  it("resetMissionData 同时清除累计覆盖和未来预览", () => {
+    const sample = { timeSeconds: 12, verticesEcefM: [[1, 0, 0], [0, 1, 0], [0, 0, 1]] as [number, number, number][] };
+    useSimulationStore.setState({ coverageHistory: [sample] });
+    useSimulationStore.getState().setCoveragePreview([sample]);
+    useSimulationStore.getState().resetMissionData();
+    expect(useSimulationStore.getState().coverageHistory).toEqual([]);
+    expect(useSimulationStore.getState().coveragePreview).toEqual([]);
+  });
+
   it("可从主星克隆、独立修改和删除伴飞星", () => {
     const store = useSimulationStore.getState();
     store.addCompanionSatellite();

@@ -3,7 +3,7 @@ import { deriveSarSystemParameters, SAR_IMAGING_ALGORITHMS } from "@spacedrone/o
 import { useEffect, useMemo, useRef, useState } from "react";
 import { downloadBinaryFile, downloadTextFile, timestampedFileName } from "../io/browserFiles";
 import { sarAnalysisToCsv } from "../io/sarExport";
-import { sarEchoToBinary } from "../io/sarEchoExport";
+import { sarEchoToBinary, sarEchoToMatFile } from "../io/sarEchoExport";
 import { sarDbfToBinary, sarSpectrumToCsv } from "../io/sarDbfExport";
 import { useSimulationStore } from "../stores/simulationStore";
 import { runSarAnalysisWorker } from "../workers/sarAnalysisWorkerClient";
@@ -253,7 +253,10 @@ export function SarAnalysisPanel() {
         <Descriptions.Item label="方位模糊">阶数 ≤ {echoResult.echo.ambiguity.maximumAzimuthAmbiguityOrder} · 估计 {echoResult.echo.ambiguity.estimatedAzimuthReplicaCount} 个谱副本</Descriptions.Item>
       </Descriptions>
       <EchoPreview result={echoResult} />
-      <Button size="small" onClick={() => downloadBinaryFile(timestampedFileName("spacedrone-sar-echo", "spdriq"), sarEchoToBinary(echoResult))}>导出 SPDRIQ1 交织 Float32</Button>
+      <Space wrap>
+        <Button size="small" type="primary" onClick={() => downloadBinaryFile(timestampedFileName("spacedrone-sar-echo", "mat"), sarEchoToMatFile(echoResult))}>导出 MATLAB .mat</Button>
+        <Button size="small" onClick={() => downloadBinaryFile(timestampedFileName("spacedrone-sar-echo", "spdriq"), sarEchoToBinary(echoResult))}>导出 SPDRIQ1 交织 Float32</Button>
+      </Space>
     </Space>}
     {dbfResult && <Space orientation="vertical" style={{ width: "100%" }}>
       <Descriptions size="small" column={1} colon={false}>

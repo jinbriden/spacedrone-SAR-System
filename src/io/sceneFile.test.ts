@@ -76,6 +76,11 @@ describe("scene file schema", () => {
     delete legacy.scene.displaySettings.showEarthTexture;
     delete legacy.scene.displaySettings.showBorders;
     delete legacy.scene.displaySettings.satelliteModelUrl;
+    delete legacy.scene.displaySettings.showPreview;
+    delete legacy.scene.displaySettings.baseMapMode;
+    delete legacy.scene.missionSettings.previewStartSeconds;
+    delete legacy.scene.missionSettings.previewEndSeconds;
+    delete legacy.scene.missionSettings.previewStepSeconds;
     const parsed = parseSceneFile(legacy);
     expect(parsed.scene.displaySettings).toMatchObject({
       showEarthReferences: false,
@@ -84,7 +89,10 @@ describe("scene file schema", () => {
       showEarthTexture: true,
       showBorders: true,
       satelliteModelUrl: "",
+      showPreview: true,
+      baseMapMode: "onlineImagery",
     });
+    expect(parsed.scene.missionSettings).toMatchObject({ previewStartSeconds: 0, previewEndSeconds: 6000, previewStepSeconds: 30 });
   });
 
   it("旧点目标缺少区域字段时自动迁移为 point", () => {

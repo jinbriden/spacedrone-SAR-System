@@ -336,16 +336,23 @@ function parseMissionSettings(value: unknown): MissionSettings {
   const taskPlanEndSeconds = boundedNumber(item.taskPlanEndSeconds ?? 86_400, "scene.missionSettings.taskPlanEndSeconds", 0, 315576000);
   const taskPlanSampleStepSeconds = positiveNumber(item.taskPlanSampleStepSeconds ?? 10, "scene.missionSettings.taskPlanSampleStepSeconds");
   const taskPlanTransitionToleranceSeconds = positiveNumber(item.taskPlanTransitionToleranceSeconds ?? 0.1, "scene.missionSettings.taskPlanTransitionToleranceSeconds");
+  const previewStartSeconds = boundedNumber(item.previewStartSeconds ?? 0, "scene.missionSettings.previewStartSeconds", 0, 315576000);
+  const previewEndSeconds = boundedNumber(item.previewEndSeconds ?? 6000, "scene.missionSettings.previewEndSeconds", 0, 315576000);
+  const previewStepSeconds = positiveNumber(item.previewStepSeconds ?? 30, "scene.missionSettings.previewStepSeconds");
   if (revisitEndSeconds <= revisitStartSeconds) throw new Error("scene.missionSettings.revisitEndSeconds 必须晚于 revisitStartSeconds。");
   if (revisitTransitionToleranceSeconds > revisitSampleStepSeconds) throw new Error("重访分析边界容差不能超过粗采样步长。");
   if (taskPlanEndSeconds <= taskPlanStartSeconds) throw new Error("scene.missionSettings.taskPlanEndSeconds 必须晚于 taskPlanStartSeconds。");
   if (taskPlanTransitionToleranceSeconds > taskPlanSampleStepSeconds) throw new Error("任务规划边界容差不能超过粗采样步长。");
+  if (previewEndSeconds <= previewStartSeconds) throw new Error("scene.missionSettings.previewEndSeconds 必须晚于 previewStartSeconds。");
   return {
     targetSampleStepSeconds: positiveNumber(item.targetSampleStepSeconds, "scene.missionSettings.targetSampleStepSeconds"),
     historyEnabled: item.historyEnabled,
     historySampleIntervalSeconds: positiveNumber(item.historySampleIntervalSeconds, "scene.missionSettings.historySampleIntervalSeconds"),
     maxHistoryFootprints: Math.round(boundedNumber(item.maxHistoryFootprints, "scene.missionSettings.maxHistoryFootprints", 1, 5000)),
     historyDisplayMode: oneOf(item.historyDisplayMode ?? "footprints", "scene.missionSettings.historyDisplayMode", ["footprints", "union"]),
+    previewStartSeconds,
+    previewEndSeconds,
+    previewStepSeconds,
     revisitStartSeconds,
     revisitEndSeconds,
     revisitSampleStepSeconds,
@@ -480,7 +487,8 @@ function parseDisplaySettings(value: unknown): DisplaySettings {
   const defaults: DisplaySettings = {
     showEarthTexture: true, showGrid: true, showBorders: true, showEarthReferences: false, lightingEnabled: false,
     showOrbit: true, showGroundTrack: true, showAxes: true,
-    showBeam: true, showFootprint: true, showTargets: true, showHistory: true,
+    showBeam: true, showFootprint: true, showTargets: true, showHistory: true, showPreview: true,
+    baseMapMode: "onlineImagery",
     satelliteScale: 1,
     satelliteModelUrl: "",
     cameraMode: "free",
@@ -506,6 +514,8 @@ function parseDisplaySettings(value: unknown): DisplaySettings {
     showFootprint: booleanValue("showFootprint"),
     showTargets: booleanValue("showTargets"),
     showHistory: booleanValue("showHistory"),
+    showPreview: booleanValue("showPreview", defaults.showPreview),
+    baseMapMode: oneOf(item.baseMapMode ?? defaults.baseMapMode, "scene.displaySettings.baseMapMode", ["offline", "onlineImagery"]),
     satelliteScale: boundedNumber(item.satelliteScale ?? defaults.satelliteScale, "scene.displaySettings.satelliteScale", 0.25, 4),
     satelliteModelUrl: typeof item.satelliteModelUrl === "string" ? item.satelliteModelUrl : defaults.satelliteModelUrl,
     cameraMode: oneOf(item.cameraMode, "scene.displaySettings.cameraMode", ["free", "satellite", "subpoint", "beamCenter"]),

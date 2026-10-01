@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ArcType,
   BoundingSphere,
@@ -7,7 +7,6 @@ import {
   Color,
   ColorGeometryInstanceAttribute,
   ColorMaterialProperty,
-  ConstantPositionProperty,
   ConstantProperty,
   CustomDataSource,
   ComponentDatatype,
@@ -41,16 +40,34 @@ import {
 import "cesium/Build/Cesium/Widgets/widgets.css";
 import {
   DEG_TO_RAD,
+  eciToEcef,
 } from "@spacedrone/orbital-core";
 import { useSceneGeometry } from "../hooks/useSceneGeometry";
 import { useTargetStates } from "../hooks/useTargetStates";
 import { useOrbitPathSamples } from "../hooks/useOrbitPathSamples";
 import { useSimulationStore } from "../stores/simulationStore";
 import { downloadCanvasPng, timestampedFileName } from "../io/browserFiles";
+import { publicAssetUrl } from "../io/publicAssetUrl";
 import { targetRegionBoundary } from "../simulation/targetRegion";
 import { computeSceneGeometry, type SceneGeometry } from "../simulation/sceneGeometry";
 import { useCompanionOrbitPathSamples } from "../hooks/useCompanionOrbitPathSamples";
 import { parseNaturalEarthBorderRings } from "./naturalEarthBorders";
+import {
+  coverageSwathRing,
+  createCoverageSwathState,
+  resetCoverageSwath,
+  syncCoverageSwath,
+} from "./coverageSwath";
+import {
+  liveBodyOrientation,
+  liveCartesianPosition,
+  liveEcefPosition,
+  liveGeodeticPosition,
+  liveOffsetEcefPosition,
+  livePolygonHierarchy,
+  liveProperty,
+  type LiveSceneFrame,
+} from "./liveScene";
 
 interface ViewerEntities {
   earthReferences: Entity[];
@@ -70,6 +87,7 @@ interface ViewerEntities {
   beamFaces: Entity[];
   footprint: Entity;
   beamCenterPoint: Entity;
+  coverageSwath: Entity;
 }
 
 interface ViewerHoverInfo {
@@ -155,11 +173,13 @@ export function GlobeViewer() {
   const viewerRef = useRef<Viewer | undefined>(undefined);
   const gridLayerRef = useRef<ImageryLayer | undefined>(undefined);
   const earthTextureLayerRef = useRef<ImageryLayer | undefined>(undefined);
+  const onlineEarthTextureLayerRef = useRef<ImageryLayer | undefined>(undefined);
   const bordersRef = useRef<CustomDataSource | undefined>(undefined);
   const entitiesRef = useRef<ViewerEntities | undefined>(undefined);
   const targetEntitiesRef = useRef<Map<string, Entity>>(new Map());
   const historyEntitiesRef = useRef<Map<string, Entity>>(new Map());
   const unionEntitiesRef = useRef<Entity[]>([]);
+  const previewEntitiesRef = useRef<Entity[]>([]);
   const companionEntitiesRef = useRef<Map<string, CompanionViewerEntities>>(new Map());
   const companionAdditionalBeamEntitiesRef = useRef<Map<string, Pick<AdditionalBeamViewerEntities, "beamAxis" | "footprint">>>(new Map());
   const additionalBeamEntitiesRef = useRef<Map<string, AdditionalBeamViewerEntities>>(new Map());
@@ -169,6 +189,9 @@ export function GlobeViewer() {
     coverage?: SceneGeometry["coverage"];
   }>({});
   const processedScreenshotRevisionRef = useRef(0);
+  const lastOrbitPathUpdateSecondsRef = useRef<number | undefined>(undefined);
+  const liveRef = useRef<LiveSceneFrame | undefined>(undefined);
+  const coverageSwathRef = useRef(createCoverageSwathState());
   const [hoverInfo, setHoverInfo] = useState<ViewerHoverInfo>();
   const [viewerError, setViewerError] = useState<string>();
   const orbit = useSimulationStore((state) => state.orbit);
@@ -185,6 +208,7 @@ export function GlobeViewer() {
   const terrain = useSimulationStore((state) => state.terrain);
   const coverageHistory = useSimulationStore((state) => state.coverageHistory);
   const coverageUnion = useSimulationStore((state) => state.coverageUnion);
+  const coveragePreview = useSimulationStore((state) => state.coveragePreview);
   const historyDisplayMode = useSimulationStore((state) => state.missionSettings.historyDisplayMode);
   const targetStates = useTargetStates();
   const orbitPathState = useOrbitPathSamples(orbit);
@@ -194,6 +218,15 @@ export function GlobeViewer() {
   const cameraResetRevision = useSimulationStore((state) => state.cameraResetRevision);
   const screenshotRevision = useSimulationStore((state) => state.screenshotRevision);
   hoverDataRef.current = { satellite, coverage };
+  liveRef.current = {
+    satellite,
+    attitude: attitudeState,
+    coverage,
+    beams: beamStates,
+    antenna,
+    displaySettings,
+    orbit,
+  };
 
   const companionScenes = useMemo(() => {
     const simulationDateUtc = new Date(Date.parse(orbit.epochUtc) + elapsedSeconds * 1000);
@@ -205,12 +238,15 @@ export function GlobeViewer() {
       }
     });
   }, [companionSatellites, elapsedSeconds, orbit.epochUtc, targets, terrain]);
+  const companionScenesRef = useRef(companionScenes);
+  companionScenesRef.current = companionScenes;
 
   const paths = useMemo(() => {
     const samples = orbitPathState.result?.samples ?? [];
     const orbitPositions = samples.map((sample) =>
       Cartesian3.fromElements(...sample.orbitPositionEcefAtEpochM),
     );
+    const orbitPositionsEciM = samples.map((sample) => sample.positionEciM);
     const groundTrackPositions = samples.map((sample) =>
       Cartesian3.fromDegrees(
         sample.satellite.longitudeDeg,
@@ -218,7 +254,7 @@ export function GlobeViewer() {
         100,
       ),
     );
-    return { orbitPositions, groundTrackPositions };
+    return { orbitPositions, orbitPositionsEciM, groundTrackPositions };
   }, [orbitPathState.result]);
 
   useEffect(() => {
@@ -265,12 +301,21 @@ export function GlobeViewer() {
         backgroundColor: Color.TRANSPARENT,
       }),
     );
+    onlineEarthTextureLayerRef.current = viewer.imageryLayers.addImageryProvider(
+      new UrlTemplateImageryProvider({
+        url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        maximumLevel: 19,
+        credit: "Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      }),
+    );
+    onlineEarthTextureLayerRef.current.show = useSimulationStore.getState().displaySettings.showEarthTexture
+      && useSimulationStore.getState().displaySettings.baseMapMode === "onlineImagery";
     const borders = new CustomDataSource("Natural Earth 1:110m 国界");
     borders.show = useSimulationStore.getState().displaySettings.showBorders;
     bordersRef.current = borders;
     void viewer.dataSources.add(borders);
     const borderAbortController = new AbortController();
-    void fetch("/data/ne_110m_admin_0_countries.geojson", { signal: borderAbortController.signal })
+    void fetch(publicAssetUrl("data/ne_110m_admin_0_countries.geojson"), { signal: borderAbortController.signal })
       .then((response) => {
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         return response.json() as Promise<unknown>;
@@ -300,6 +345,31 @@ export function GlobeViewer() {
       destination: Cartesian3.fromDegrees(105, 20, 22_000_000),
     });
     viewerRef.current = viewer;
+
+    const onPreRender = () => {
+      const frame = liveRef.current;
+      if (!frame || viewer.isDestroyed()) return;
+      viewer.clock.currentTime = JulianDate.fromDate(frame.satellite.dateUtc);
+      if (frame.displaySettings.showHistory && frame.coverage.isClosed) {
+        syncCoverageSwath(coverageSwathRef.current, {
+          elapsedSeconds: frame.satellite.elapsedSeconds,
+          centerEcefM: frame.coverage.centerIntersection?.pointEcefM
+            ?? frame.coverage.vertices[0]?.pointEcefM
+            ?? frame.satellite.positionEcefM,
+          verticesEcefM: frame.coverage.vertices.map((vertex) => vertex.pointEcefM),
+          crossTrackEcef: frame.attitude.lvlhAxesEcef[1],
+        });
+      }
+      const mode = frame.displaySettings.cameraMode;
+      if (mode === "free") return;
+      const target = mode === "satellite"
+        ? Cartesian3.fromElements(...frame.satellite.positionEcefM)
+        : mode === "beamCenter" && frame.coverage.centerIntersection
+          ? Cartesian3.fromElements(...frame.coverage.centerIntersection.pointEcefM)
+          : Cartesian3.fromDegrees(frame.satellite.longitudeDeg, frame.satellite.latitudeDeg, 100);
+      viewer.camera.lookAt(target, new HeadingPitchRange(0, -0.55, mode === "satellite" ? 1_800_000 : 2_800_000));
+    };
+    viewer.scene.preRender.addEventListener(onPreRender);
 
     const handler = new ScreenSpaceEventHandler(viewer.scene.canvas);
     handler.setInputAction((movement: { position: Cartesian2 }) => {
@@ -400,17 +470,20 @@ export function GlobeViewer() {
     return () => {
       borderAbortController.abort();
       handler.destroy();
+      viewer.scene.preRender.removeEventListener(onPreRender);
       viewer.scene.canvas.removeEventListener("webglcontextlost", onContextLost);
       viewer.destroy();
       viewerRef.current = undefined;
       terrainPrimitiveRef.current = undefined;
       gridLayerRef.current = undefined;
       earthTextureLayerRef.current = undefined;
+      onlineEarthTextureLayerRef.current = undefined;
       bordersRef.current = undefined;
       entitiesRef.current = undefined;
       companionEntitiesRef.current.clear();
       companionAdditionalBeamEntitiesRef.current.clear();
       additionalBeamEntitiesRef.current.clear();
+      resetCoverageSwath(coverageSwathRef.current);
     };
   }, [setPickedLocation, updateDisplaySettings]);
 
@@ -505,9 +578,11 @@ export function GlobeViewer() {
   }, [screenshotRevision]);
 
   useEffect(() => {
-    if (!earthTextureLayerRef.current) return;
-    earthTextureLayerRef.current.show = displaySettings.showEarthTexture;
-  }, [displaySettings.showEarthTexture]);
+    if (earthTextureLayerRef.current) earthTextureLayerRef.current.show = displaySettings.showEarthTexture;
+    if (onlineEarthTextureLayerRef.current) {
+      onlineEarthTextureLayerRef.current.show = displaySettings.showEarthTexture && displaySettings.baseMapMode === "onlineImagery";
+    }
+  }, [displaySettings.baseMapMode, displaySettings.showEarthTexture]);
 
   useEffect(() => {
     if (!gridLayerRef.current) return;
@@ -530,18 +605,26 @@ export function GlobeViewer() {
     const viewer = viewerRef.current;
     if (!viewer || paths.orbitPositions.length < 2) return;
     viewer.entities.removeAll();
+    lastOrbitPathUpdateSecondsRef.current = undefined;
     targetEntitiesRef.current.clear();
     historyEntitiesRef.current.clear();
     unionEntitiesRef.current = [];
+    previewEntitiesRef.current = [];
     companionEntitiesRef.current.clear();
     companionAdditionalBeamEntitiesRef.current.clear();
     additionalBeamEntitiesRef.current.clear();
+    const getFrame = () => liveRef.current!;
+    const satellitePosition = liveEcefPosition(() => getFrame().satellite.positionEcefM);
+    const satelliteOrientation = liveBodyOrientation(() => getFrame().attitude.bodyAxesEcef);
+    const antennaPosition = liveEcefPosition(() => getFrame().coverage.originEcefM);
     const orbitEntity = viewer.entities.add({
       name: "三维轨道线",
       polyline: {
         positions: paths.orbitPositions,
-        width: 1.5,
-        material: Color.fromCssColorString("#4ecfff").withAlpha(0.75),
+        width: 3,
+        arcType: ArcType.NONE,
+        material: Color.fromCssColorString("#4ecfff"),
+        depthFailMaterial: Color.fromCssColorString("#4ecfff").withAlpha(0.28),
       },
     });
     const groundTrackEntity = viewer.entities.add({
@@ -601,7 +684,8 @@ export function GlobeViewer() {
     ];
     const satelliteEntity = viewer.entities.add({
       name: "卫星",
-      position: Cartesian3.ZERO,
+      position: satellitePosition,
+      orientation: satelliteOrientation,
       point: {
         pixelSize: 13,
         color: Color.WHITE,
@@ -626,8 +710,8 @@ export function GlobeViewer() {
     const satelliteParts = [
       viewer.entities.add({
         name: "卫星简化机身",
-        position: Cartesian3.ZERO,
-        orientation: Quaternion.IDENTITY,
+        position: satellitePosition,
+        orientation: satelliteOrientation,
         box: {
           dimensions: new Cartesian3(48_000, 34_000, 32_000),
           material: Color.fromCssColorString("#d9d9d9"),
@@ -637,8 +721,12 @@ export function GlobeViewer() {
       }),
       viewer.entities.add({
         name: "卫星左太阳翼",
-        position: Cartesian3.ZERO,
-        orientation: Quaternion.IDENTITY,
+        position: liveOffsetEcefPosition(
+          () => getFrame().satellite.positionEcefM,
+          () => getFrame().attitude.bodyAxesEcef[1],
+          () => 62_000 * getFrame().displaySettings.satelliteScale,
+        ),
+        orientation: satelliteOrientation,
         box: {
           dimensions: new Cartesian3(38_000, 76_000, 4_000),
           material: Color.fromCssColorString("#1769aa"),
@@ -648,8 +736,12 @@ export function GlobeViewer() {
       }),
       viewer.entities.add({
         name: "卫星右太阳翼",
-        position: Cartesian3.ZERO,
-        orientation: Quaternion.IDENTITY,
+        position: liveOffsetEcefPosition(
+          () => getFrame().satellite.positionEcefM,
+          () => getFrame().attitude.bodyAxesEcef[1],
+          () => -62_000 * getFrame().displaySettings.satelliteScale,
+        ),
+        orientation: satelliteOrientation,
         box: {
           dimensions: new Cartesian3(38_000, 76_000, 4_000),
           material: Color.fromCssColorString("#1769aa"),
@@ -659,8 +751,12 @@ export function GlobeViewer() {
       }),
       viewer.entities.add({
         name: "卫星天线图标",
-        position: Cartesian3.ZERO,
-        orientation: Quaternion.IDENTITY,
+        position: liveOffsetEcefPosition(
+          () => getFrame().satellite.positionEcefM,
+          () => getFrame().attitude.bodyAxesEcef[2],
+          () => 24_000 * getFrame().displaySettings.satelliteScale,
+        ),
+        orientation: satelliteOrientation,
         cylinder: {
           length: 18_000,
           topRadius: 5_000,
@@ -673,7 +769,7 @@ export function GlobeViewer() {
     ];
     const antennaEntity = viewer.entities.add({
       name: "天线相位中心",
-      position: Cartesian3.ZERO,
+      position: antennaPosition,
       point: {
         pixelSize: 7,
         color: Color.fromCssColorString("#fadb14"),
@@ -683,7 +779,11 @@ export function GlobeViewer() {
     });
     const subpointEntity = viewer.entities.add({
       name: "当前星下点",
-      position: Cartesian3.ZERO,
+      position: liveGeodeticPosition(
+        () => getFrame().satellite.longitudeDeg,
+        () => getFrame().satellite.latitudeDeg,
+        100,
+      ),
       point: {
         pixelSize: 9,
         color: Color.fromCssColorString("#ff4d4f"),
@@ -694,7 +794,13 @@ export function GlobeViewer() {
     const linkEntity = viewer.entities.add({
       name: "星下连线",
       polyline: {
-        positions: [Cartesian3.ZERO, Cartesian3.ZERO],
+        positions: liveProperty(() => {
+          const frame = getFrame();
+          return [
+            Cartesian3.fromElements(...frame.satellite.positionEcefM),
+            Cartesian3.fromDegrees(frame.satellite.longitudeDeg, frame.satellite.latitudeDeg, 100),
+          ];
+        }),
         width: 1,
         material: Color.WHITE.withAlpha(0.45),
       },
@@ -703,7 +809,11 @@ export function GlobeViewer() {
       viewer.entities.add({
         name: `LVLH ${["+X 沿航迹", "+Y 横航迹", "+Z 天底"][index]}`,
         polyline: {
-          positions: [Cartesian3.ZERO, Cartesian3.ZERO],
+          positions: liveProperty(() => {
+            const frame = getFrame();
+            const origin = Cartesian3.fromElements(...frame.satellite.positionEcefM);
+            return [origin, endpointAlong(origin, frame.attitude.lvlhAxesEcef[index], 160_000)];
+          }),
           width: 2,
           material: new PolylineDashMaterialProperty({
             color: color.withAlpha(0.65),
@@ -716,7 +826,11 @@ export function GlobeViewer() {
       viewer.entities.add({
         name: `本体 +${["X", "Y", "Z"][index]}`,
         polyline: {
-          positions: [Cartesian3.ZERO, Cartesian3.ZERO],
+          positions: liveProperty(() => {
+            const frame = getFrame();
+            const origin = Cartesian3.fromElements(...frame.satellite.positionEcefM);
+            return [origin, endpointAlong(origin, frame.attitude.bodyAxesEcef[index], 110_000)];
+          }),
           width: 3,
           material: color,
         },
@@ -725,18 +839,36 @@ export function GlobeViewer() {
     const beamAxis = viewer.entities.add({
       name: "天线波束中心轴",
       polyline: {
-        positions: [Cartesian3.ZERO, Cartesian3.ZERO],
+        positions: liveProperty(() => {
+          const frame = getFrame();
+          const origin = Cartesian3.fromElements(...frame.coverage.originEcefM);
+          const lengthM = frame.coverage.centerIntersection?.distanceM ?? frame.antenna.maxDisplayDistanceM;
+          return [origin, endpointAlong(origin, frame.coverage.centerDirectionEcef, lengthM)];
+        }),
         width: 2.5,
         material: Color.fromCssColorString("#fadb14"),
       },
     });
     const beamVolume = viewer.entities.add({
       name: "圆锥波束体",
-      position: Cartesian3.ZERO,
-      orientation: Quaternion.IDENTITY,
+      position: liveCartesianPosition(() => {
+        const frame = getFrame();
+        const origin = Cartesian3.fromElements(...frame.coverage.originEcefM);
+        const direction = Cartesian3.fromElements(...frame.coverage.centerDirectionEcef);
+        const lengthM = frame.coverage.centerIntersection?.distanceM ?? frame.antenna.maxDisplayDistanceM;
+        return Cartesian3.add(origin, Cartesian3.multiplyByScalar(direction, lengthM / 2, new Cartesian3()), new Cartesian3());
+      }),
+      orientation: liveProperty(() => quaternionFromPositiveZ(Cartesian3.fromElements(...getFrame().coverage.centerDirectionEcef))),
       cylinder: {
-        length: 1,
-        topRadius: 1,
+        length: liveProperty(() => {
+          const frame = getFrame();
+          return frame.coverage.centerIntersection?.distanceM ?? frame.antenna.maxDisplayDistanceM;
+        }),
+        topRadius: liveProperty(() => {
+          const frame = getFrame();
+          const lengthM = frame.coverage.centerIntersection?.distanceM ?? frame.antenna.maxDisplayDistanceM;
+          return lengthM * Math.tan((frame.antenna.circularBeamwidthDeg * DEG_TO_RAD) / 2);
+        }),
         bottomRadius: 0,
         material: Color.fromCssColorString("#fadb14").withAlpha(0.2),
         outline: true,
@@ -746,7 +878,23 @@ export function GlobeViewer() {
     const beamBoundaryRays = viewer.entities.add({
       name: "波束边界射线",
       polyline: {
-        positions: [Cartesian3.ZERO, Cartesian3.ZERO],
+        positions: liveProperty(() => {
+          const frame = getFrame();
+          const origin = Cartesian3.fromElements(...frame.coverage.originEcefM);
+          const coverage = frame.coverage;
+          const boundaryEndpoints = coverage.isClosed
+            ? coverage.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM))
+            : coverage.boundaryDirectionsEcef.map((direction) =>
+                endpointAlong(origin, direction, frame.antenna.maxDisplayDistanceM),
+              );
+          const displayedRayCount = Math.min(16, boundaryEndpoints.length);
+          const rayPositions: Cartesian3[] = [];
+          for (let index = 0; index < displayedRayCount; index += 1) {
+            const boundaryIndex = Math.floor((index * boundaryEndpoints.length) / displayedRayCount);
+            rayPositions.push(origin, boundaryEndpoints[boundaryIndex], origin);
+          }
+          return rayPositions.length > 0 ? rayPositions : [origin, origin];
+        }),
         width: 1,
         material: Color.fromCssColorString("#ffe58f").withAlpha(0.65),
       },
@@ -754,7 +902,14 @@ export function GlobeViewer() {
     const beamPerimeter = viewer.entities.add({
       name: "波束地面交线",
       polyline: {
-        positions: [Cartesian3.ZERO, Cartesian3.ZERO],
+        positions: liveProperty(() => {
+          const coverage = getFrame().coverage;
+          if (!coverage.isClosed || coverage.vertices.length === 0) {
+            return [Cartesian3.ZERO, Cartesian3.ZERO];
+          }
+          const points = coverage.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM));
+          return [...points, points[0]];
+        }),
         width: 2,
         material: Color.fromCssColorString("#36cfc9"),
       },
@@ -763,11 +918,22 @@ export function GlobeViewer() {
       viewer.entities.add({
         name: `波束侧面 ${index + 1}`,
         polygon: {
-          hierarchy: new PolygonHierarchy([
-            Cartesian3.ZERO,
-            Cartesian3.ZERO,
-            Cartesian3.ZERO,
-          ]),
+          hierarchy: liveProperty(() => {
+            const frame = getFrame();
+            const origin = Cartesian3.fromElements(...frame.coverage.originEcefM);
+            const coverage = frame.coverage;
+            const boundaryEndpoints = coverage.isClosed
+              ? coverage.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM))
+              : coverage.boundaryDirectionsEcef.map((direction) =>
+                  endpointAlong(origin, direction, frame.antenna.maxDisplayDistanceM),
+                );
+            if (boundaryEndpoints.length < 3) {
+              return new PolygonHierarchy([origin, origin, origin]);
+            }
+            const firstIndex = Math.floor((index * boundaryEndpoints.length) / 16);
+            const secondIndex = Math.floor((((index + 1) % 16) * boundaryEndpoints.length) / 16);
+            return new PolygonHierarchy([origin, boundaryEndpoints[firstIndex], boundaryEndpoints[secondIndex]]);
+          }),
           perPositionHeight: true,
           material: Color.fromCssColorString("#fadb14").withAlpha(0.055),
           outline: false,
@@ -777,11 +943,12 @@ export function GlobeViewer() {
     const footprint = viewer.entities.add({
       name: "当前瞬时覆盖区",
       polygon: {
-        hierarchy: new PolygonHierarchy([
-          Cartesian3.ZERO,
-          Cartesian3.ZERO,
-          Cartesian3.ZERO,
-        ]),
+        hierarchy: livePolygonHierarchy(() => {
+          const coverage = getFrame().coverage;
+          return coverage.isClosed
+            ? coverage.vertices.map((vertex) => vertex.pointEcefM)
+            : [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        }),
         perPositionHeight: true,
         material: Color.fromCssColorString("#13c2c2").withAlpha(0.42),
         outline: true,
@@ -790,12 +957,29 @@ export function GlobeViewer() {
     });
     const beamCenterPoint = viewer.entities.add({
       name: "波束中心地面点",
-      position: Cartesian3.ZERO,
+      position: liveCartesianPosition(() => {
+        const hit = getFrame().coverage.centerIntersection;
+        return hit ? Cartesian3.fromElements(...hit.pointEcefM) : Cartesian3.ZERO;
+      }),
       point: {
         pixelSize: 8,
         color: Color.fromCssColorString("#fadb14"),
         outlineColor: Color.WHITE,
         outlineWidth: 2,
+      },
+    });
+    const coverageSwath = viewer.entities.add({
+      name: "波束覆盖轨迹",
+      polygon: {
+        show: liveProperty(() => coverageSwathRing(coverageSwathRef.current).length >= 4),
+        hierarchy: livePolygonHierarchy(() => {
+          const ring = coverageSwathRing(coverageSwathRef.current);
+          return ring.length >= 4 ? ring : [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+        }),
+        perPositionHeight: true,
+        material: Color.fromCssColorString("#13c2c2").withAlpha(0.2),
+        outline: true,
+        outlineColor: Color.fromCssColorString("#5cdbd3").withAlpha(0.85),
       },
     });
     entitiesRef.current = {
@@ -816,10 +1000,11 @@ export function GlobeViewer() {
       beamFaces,
       footprint,
       beamCenterPoint,
+      coverageSwath,
     };
   }, [paths]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer || !entitiesRef.current) return;
     for (const entities of additionalBeamEntitiesRef.current.values()) {
@@ -828,22 +1013,42 @@ export function GlobeViewer() {
       viewer.entities.remove(entities.footprint);
     }
     additionalBeamEntitiesRef.current.clear();
+    const getFrame = () => liveRef.current!;
     for (const feed of antenna.arrayFeeds.filter((item) => item.enabled)) {
       const color = Color.fromCssColorString(feed.color);
       additionalBeamEntitiesRef.current.set(feed.id, {
         phaseCenter: viewer.entities.add({
           name: `${feed.name} 相位中心`,
-          position: Cartesian3.ZERO,
+          position: liveEcefPosition(() => {
+            const beam = getFrame().beams.find((item) => item.id === feed.id);
+            return beam?.originEcefM ?? [0, 0, 0];
+          }),
           point: { pixelSize: 6, color, outlineColor: Color.WHITE, outlineWidth: 1 },
         }),
         beamAxis: viewer.entities.add({
           name: `${feed.name} 波束中心轴`,
-          polyline: { positions: [Cartesian3.ZERO, Cartesian3.ZERO], width: 2, material: color.withAlpha(0.9) },
+          polyline: {
+            positions: liveProperty(() => {
+              const frame = getFrame();
+              const beam = frame.beams.find((item) => item.id === feed.id);
+              if (!beam) return [Cartesian3.ZERO, Cartesian3.ZERO];
+              const origin = Cartesian3.fromElements(...beam.originEcefM);
+              const distanceM = beam.centerIntersection?.distanceM ?? frame.antenna.maxDisplayDistanceM;
+              return [origin, endpointAlong(origin, beam.centerDirectionEcef, distanceM)];
+            }),
+            width: 2,
+            material: color.withAlpha(0.9),
+          },
         }),
         footprint: viewer.entities.add({
           name: `${feed.name} 瞬时覆盖区`,
           polygon: {
-            hierarchy: new PolygonHierarchy([Cartesian3.ZERO, Cartesian3.ZERO, Cartesian3.ZERO]),
+            hierarchy: livePolygonHierarchy(() => {
+              const beam = getFrame().beams.find((item) => item.id === feed.id);
+              return beam?.isClosed
+                ? beam.vertices.map((vertex) => vertex.pointEcefM)
+                : [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+            }),
             perPositionHeight: true,
             material: color.withAlpha(Math.min(0.65, antenna.beamOpacity * 1.8)),
             outline: true,
@@ -858,28 +1063,11 @@ export function GlobeViewer() {
     for (const beam of beamStates.slice(1)) {
       const entities = additionalBeamEntitiesRef.current.get(beam.id);
       if (!entities) continue;
-      const origin = Cartesian3.fromElements(...beam.originEcefM);
-      entities.phaseCenter.position = new ConstantPositionProperty(origin);
       entities.phaseCenter.show = displaySettings.showBeam;
-      if (entities.beamAxis.polyline) {
-        const distanceM = beam.centerIntersection?.distanceM ?? antenna.maxDisplayDistanceM;
-        entities.beamAxis.polyline.positions = new ConstantProperty([
-          origin,
-          endpointAlong(origin, beam.centerDirectionEcef, distanceM),
-        ]);
-      }
       entities.beamAxis.show = displaySettings.showBeam;
-      if (entities.footprint.polygon) {
-        entities.footprint.polygon.show = new ConstantProperty(displaySettings.showFootprint && beam.isClosed);
-        entities.footprint.polygon.hierarchy = new ConstantProperty(new PolygonHierarchy(
-          beam.isClosed
-            ? beam.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM))
-            : [Cartesian3.ZERO, Cartesian3.ZERO, Cartesian3.ZERO],
-        ));
-      }
       entities.footprint.show = displaySettings.showFootprint;
     }
-  }, [antenna.maxDisplayDistanceM, beamStates, displaySettings.showBeam, displaySettings.showFootprint]);
+  }, [beamStates, displaySettings.showBeam, displaySettings.showFootprint]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
@@ -907,17 +1095,44 @@ export function GlobeViewer() {
         polyline: { positions: samples.map((sample) => Cartesian3.fromDegrees(sample.satellite.longitudeDeg, sample.satellite.latitudeDeg, 120)), width: 1.5, material: color.withAlpha(0.65) },
       });
       const satelliteEntity = viewer.entities.add({
-        name: companion.name, position: Cartesian3.ZERO,
+        name: companion.name,
+        position: liveCartesianPosition(() => {
+          const item = companionScenesRef.current.find((entry) => entry.item.id === companion.id);
+          if (!item || !("scene" in item) || !item.scene) return Cartesian3.ZERO;
+          return Cartesian3.fromElements(...item.scene.satellite.positionEcefM);
+        }),
         point: { pixelSize: 12, color, outlineColor: Color.WHITE, outlineWidth: 2 },
         label: { text: companion.name, font: "13px sans-serif", fillColor: color, outlineColor: Color.BLACK, outlineWidth: 2, pixelOffset: new Cartesian2(0, -22) },
       });
       const beamAxis = viewer.entities.add({
         name: `${companion.name} 波束中心轴`,
-        polyline: { positions: [Cartesian3.ZERO, Cartesian3.ZERO], width: 1.8, material: color.withAlpha(0.9) },
+        polyline: {
+          positions: liveProperty(() => {
+            const item = companionScenesRef.current.find((entry) => entry.item.id === companion.id);
+            if (!item || !("scene" in item) || !item.scene) return [Cartesian3.ZERO, Cartesian3.ZERO];
+            const origin = Cartesian3.fromElements(...item.scene.coverage.originEcefM);
+            const distanceM = item.scene.coverage.centerIntersection?.distanceM ?? companion.antenna.maxDisplayDistanceM;
+            return [origin, endpointAlong(origin, item.scene.coverage.centerDirectionEcef, distanceM)];
+          }),
+          width: 1.8,
+          material: color.withAlpha(0.9),
+        },
       });
       const footprint = viewer.entities.add({
         name: `${companion.name} 当前覆盖区`,
-        polygon: { hierarchy: new PolygonHierarchy([Cartesian3.ZERO, Cartesian3.ZERO, Cartesian3.ZERO]), perPositionHeight: true, material: color.withAlpha(0.22), outline: true, outlineColor: color.withAlpha(0.85) },
+        polygon: {
+          hierarchy: livePolygonHierarchy(() => {
+            const item = companionScenesRef.current.find((entry) => entry.item.id === companion.id);
+            if (!item || !("scene" in item) || !item.scene || !item.scene.coverage.isClosed) {
+              return [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+            }
+            return item.scene.coverage.vertices.map((vertex) => vertex.pointEcefM);
+          }),
+          perPositionHeight: true,
+          material: color.withAlpha(0.22),
+          outline: true,
+          outlineColor: color.withAlpha(0.85),
+        },
       });
       companionEntitiesRef.current.set(companion.id, { orbit: orbitEntity, groundTrack, satellite: satelliteEntity, beamAxis, footprint });
     }
@@ -930,29 +1145,15 @@ export function GlobeViewer() {
     for (const item of companionScenes) {
       const entities = companionEntitiesRef.current.get(item.item.id);
       if (!entities || !("scene" in item) || !item.scene) continue;
-      const scene: SceneGeometry = item.scene;
-      const satellitePosition = Cartesian3.fromElements(...scene.satellite.positionEcefM);
-      entities.satellite.position = new ConstantPositionProperty(satellitePosition);
-      if (entities.beamAxis.polyline) {
-        const distanceM = scene.coverage.centerIntersection?.distanceM ?? item.item.antenna.maxDisplayDistanceM;
-        entities.beamAxis.polyline.positions = new ConstantProperty([
-          Cartesian3.fromElements(...scene.coverage.originEcefM),
-          endpointAlong(Cartesian3.fromElements(...scene.coverage.originEcefM), scene.coverage.centerDirectionEcef, distanceM),
-        ]);
-      }
-      if (entities.footprint.polygon) {
-        entities.footprint.polygon.show = new ConstantProperty(scene.coverage.isClosed);
-        entities.footprint.polygon.hierarchy = new ConstantProperty(new PolygonHierarchy(
-          scene.coverage.isClosed ? scene.coverage.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM)) : [Cartesian3.ZERO, Cartesian3.ZERO, Cartesian3.ZERO],
-        ));
-      }
+      const companionId = item.item.id;
       entities.orbit.show = displaySettings.showOrbit;
       entities.groundTrack.show = displaySettings.showGroundTrack;
       entities.satellite.show = true;
       entities.beamAxis.show = displaySettings.showBeam;
       entities.footprint.show = displaySettings.showFootprint;
-      for (const beam of scene.beams.slice(1)) {
-        const key = `${item.item.id}:${beam.id}`;
+      for (const beam of item.scene.beams.slice(1)) {
+        const key = `${companionId}:${beam.id}`;
+        const beamId = beam.id;
         activeAdditionalBeamKeys.add(key);
         let additional = companionAdditionalBeamEntitiesRef.current.get(key);
         if (!additional) {
@@ -960,12 +1161,36 @@ export function GlobeViewer() {
           additional = {
             beamAxis: viewer.entities.add({
               name: `${item.item.name} / ${beam.name} 波束中心轴`,
-              polyline: { positions: [Cartesian3.ZERO, Cartesian3.ZERO], width: 1.5, material: color.withAlpha(0.85) },
+              polyline: {
+                positions: liveProperty(() => {
+                  const entry = companionScenesRef.current.find((candidate) => candidate.item.id === companionId);
+                  if (!entry || !("scene" in entry) || !entry.scene) return [Cartesian3.ZERO, Cartesian3.ZERO];
+                  const liveBeam = entry.scene.beams.find((candidate) => candidate.id === beamId);
+                  if (!liveBeam) return [Cartesian3.ZERO, Cartesian3.ZERO];
+                  const origin = Cartesian3.fromElements(...liveBeam.originEcefM);
+                  return [
+                    origin,
+                    endpointAlong(
+                      origin,
+                      liveBeam.centerDirectionEcef,
+                      liveBeam.centerIntersection?.distanceM ?? entry.item.antenna.maxDisplayDistanceM,
+                    ),
+                  ];
+                }),
+                width: 1.5,
+                material: color.withAlpha(0.85),
+              },
             }),
             footprint: viewer.entities.add({
               name: `${item.item.name} / ${beam.name} 当前覆盖区`,
               polygon: {
-                hierarchy: new PolygonHierarchy([Cartesian3.ZERO, Cartesian3.ZERO, Cartesian3.ZERO]),
+                hierarchy: livePolygonHierarchy(() => {
+                  const entry = companionScenesRef.current.find((candidate) => candidate.item.id === companionId);
+                  if (!entry || !("scene" in entry) || !entry.scene) return [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+                  const liveBeam = entry.scene.beams.find((candidate) => candidate.id === beamId);
+                  if (!liveBeam?.isClosed) return [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+                  return liveBeam.vertices.map((vertex) => vertex.pointEcefM);
+                }),
                 perPositionHeight: true,
                 material: color.withAlpha(0.18),
                 outline: true,
@@ -975,20 +1200,7 @@ export function GlobeViewer() {
           };
           companionAdditionalBeamEntitiesRef.current.set(key, additional);
         }
-        const origin = Cartesian3.fromElements(...beam.originEcefM);
-        if (additional.beamAxis.polyline) {
-          additional.beamAxis.polyline.positions = new ConstantProperty([
-            origin,
-            endpointAlong(origin, beam.centerDirectionEcef, beam.centerIntersection?.distanceM ?? item.item.antenna.maxDisplayDistanceM),
-          ]);
-        }
         additional.beamAxis.show = displaySettings.showBeam;
-        if (additional.footprint.polygon) {
-          additional.footprint.polygon.show = new ConstantProperty(beam.isClosed);
-          additional.footprint.polygon.hierarchy = new ConstantProperty(new PolygonHierarchy(
-            beam.isClosed ? beam.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM)) : [Cartesian3.ZERO, Cartesian3.ZERO, Cartesian3.ZERO],
-          ));
-        }
         additional.footprint.show = displaySettings.showFootprint;
       }
     }
@@ -1003,38 +1215,27 @@ export function GlobeViewer() {
   useEffect(() => {
     const entities = entitiesRef.current;
     if (!entities) return;
-    const satellitePosition = Cartesian3.fromElements(...satellite.positionEcefM);
-    const antennaPosition = Cartesian3.fromElements(...coverage.originEcefM);
-    const beamColor = Color.fromCssColorString(antenna.beamColor) ?? Color.YELLOW;
-    const subpointPosition = Cartesian3.fromDegrees(
-      satellite.longitudeDeg,
-      satellite.latitudeDeg,
-      100,
-    );
-    entities.satellite.position = new ConstantPositionProperty(satellitePosition);
-    const [bodyX, bodyY, bodyZ] = attitudeState.bodyAxesEcef;
-    const bodyOrientation = Quaternion.fromRotationMatrix(Matrix3.fromArray([
-      ...bodyX,
-      ...bodyY,
-      ...bodyZ,
-    ]));
-    entities.satellite.orientation = new ConstantProperty(bodyOrientation);
-    const customModelEnabled = displaySettings.satelliteModelUrl.trim().length > 0;
-    if (entities.satellite.point) entities.satellite.point.show = new ConstantProperty(!customModelEnabled);
-    if (entities.satellite.model) {
-      entities.satellite.model.show = new ConstantProperty(customModelEnabled);
-      entities.satellite.model.uri = new ConstantProperty(displaySettings.satelliteModelUrl);
-      entities.satellite.model.scale = new ConstantProperty(displaySettings.satelliteScale);
+    if (
+      entities.orbit.polyline
+      && paths.orbitPositionsEciM.length > 1
+      && (
+        lastOrbitPathUpdateSecondsRef.current === undefined
+        || Math.abs(satellite.elapsedSeconds - lastOrbitPathUpdateSecondsRef.current) >= 0.5
+      )
+    ) {
+      const rotationDate = orbit.earthRotationEnabled ? satellite.dateUtc : new Date(orbit.epochUtc);
+      entities.orbit.polyline.positions = new ConstantProperty(paths.orbitPositionsEciM.map((positionEciM) =>
+        Cartesian3.fromElements(...eciToEcef(positionEciM, rotationDate)),
+      ));
+      lastOrbitPathUpdateSecondsRef.current = satellite.elapsedSeconds;
     }
-    entities.satelliteParts.forEach((part) => {
-      part.orientation = new ConstantProperty(bodyOrientation);
-      part.show = !customModelEnabled;
-    });
+  }, [orbit.earthRotationEnabled, orbit.epochUtc, paths, satellite.dateUtc, satellite.elapsedSeconds]);
+
+  useEffect(() => {
+    const entities = entitiesRef.current;
+    if (!entities) return;
+    const beamColor = Color.fromCssColorString(antenna.beamColor) ?? Color.YELLOW;
     const satelliteScale = displaySettings.satelliteScale;
-    entities.satelliteParts[0].position = new ConstantPositionProperty(satellitePosition);
-    entities.satelliteParts[1].position = new ConstantPositionProperty(endpointAlong(satellitePosition, bodyY, 62_000 * satelliteScale));
-    entities.satelliteParts[2].position = new ConstantPositionProperty(endpointAlong(satellitePosition, bodyY, -62_000 * satelliteScale));
-    entities.satelliteParts[3].position = new ConstantPositionProperty(endpointAlong(satellitePosition, bodyZ, 24_000 * satelliteScale));
     if (entities.satelliteParts[0].box) {
       entities.satelliteParts[0].box.dimensions = new ConstantProperty(
         Cartesian3.multiplyByScalar(new Cartesian3(48_000, 34_000, 32_000), satelliteScale, new Cartesian3()),
@@ -1053,154 +1254,47 @@ export function GlobeViewer() {
       dish.topRadius = new ConstantProperty(5_000 * satelliteScale);
       dish.bottomRadius = new ConstantProperty(20_000 * satelliteScale);
     }
-    entities.subpoint.position = new ConstantPositionProperty(subpointPosition);
-    if (entities.link.polyline) {
-      entities.link.polyline.positions = new ConstantProperty([
-        satellitePosition,
-        subpointPosition,
-      ]);
-    }
-    entities.antenna.position = new ConstantPositionProperty(antennaPosition);
-    const setAxisLine = (
-      entity: Entity,
-      direction: readonly [number, number, number],
-      lengthM: number,
-      origin = satellitePosition,
-    ) => {
-      if (entity.polyline) {
-        entity.polyline.positions = new ConstantProperty([
-          origin,
-          endpointAlong(origin, direction, lengthM),
-        ]);
-      }
-    };
-    attitudeState.lvlhAxesEcef.forEach((axis, index) =>
-      setAxisLine(entities.lvlhAxes[index], axis, 160_000),
-    );
-    attitudeState.bodyAxesEcef.forEach((axis, index) =>
-      setAxisLine(entities.bodyAxes[index], axis, 110_000),
-    );
-    const beamLengthM =
-      coverage.centerIntersection?.distanceM ?? antenna.maxDisplayDistanceM;
-    setAxisLine(entities.beamAxis, coverage.centerDirectionEcef, beamLengthM, antennaPosition);
-
-    const beamDirection = Cartesian3.fromElements(...coverage.centerDirectionEcef);
-    const beamMidpoint = Cartesian3.add(
-      antennaPosition,
-      Cartesian3.multiplyByScalar(
-        beamDirection,
-        beamLengthM / 2,
-        new Cartesian3(),
-      ),
-      new Cartesian3(),
-    );
-    entities.beamVolume.position = new ConstantPositionProperty(beamMidpoint);
-    entities.beamVolume.orientation = new ConstantProperty(
-      quaternionFromPositiveZ(beamDirection),
-    );
     if (entities.beamVolume.cylinder) {
-      entities.beamVolume.cylinder.length = new ConstantProperty(
-        beamLengthM,
-      );
-      entities.beamVolume.cylinder.show = new ConstantProperty(
-        antenna.beamType === "circular",
-      );
-      entities.beamVolume.cylinder.bottomRadius = new ConstantProperty(0);
-      entities.beamVolume.cylinder.topRadius = new ConstantProperty(
-        beamLengthM *
-          Math.tan((antenna.circularBeamwidthDeg * DEG_TO_RAD) / 2),
-      );
-      entities.beamVolume.cylinder.material = new ColorMaterialProperty(
-        beamColor.withAlpha(antenna.beamOpacity),
-      );
-      entities.beamVolume.cylinder.outlineColor = new ConstantProperty(
-        beamColor.withAlpha(Math.max(antenna.beamOpacity, 0.55)),
-      );
+      entities.beamVolume.cylinder.show = new ConstantProperty(antenna.beamType === "circular");
+      entities.beamVolume.cylinder.material = new ColorMaterialProperty(beamColor.withAlpha(antenna.beamOpacity));
+      entities.beamVolume.cylinder.outlineColor = new ConstantProperty(beamColor.withAlpha(Math.max(antenna.beamOpacity, 0.55)));
     }
     if (entities.beamAxis.polyline) entities.beamAxis.polyline.material = new ColorMaterialProperty(beamColor);
-
-    const boundaryEndpoints = coverage.isClosed
-      ? coverage.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM))
-      : coverage.boundaryDirectionsEcef.map((direction) =>
-          endpointAlong(satellitePosition, direction, antenna.maxDisplayDistanceM),
-        );
-    const displayedRayCount = Math.min(16, boundaryEndpoints.length);
-    const rayPositions: Cartesian3[] = [];
-    for (let index = 0; index < displayedRayCount; index += 1) {
-      const boundaryIndex = Math.floor((index * boundaryEndpoints.length) / displayedRayCount);
-      rayPositions.push(antennaPosition, boundaryEndpoints[boundaryIndex], antennaPosition);
-    }
     if (entities.beamBoundaryRays.polyline) {
-      entities.beamBoundaryRays.polyline.positions = new ConstantProperty(rayPositions);
       entities.beamBoundaryRays.polyline.material = new ColorMaterialProperty(beamColor.withAlpha(Math.max(antenna.beamOpacity, 0.4)));
     }
-
     if (entities.beamPerimeter.polyline) {
-      entities.beamPerimeter.polyline.show = new ConstantProperty(coverage.isClosed);
-      entities.beamPerimeter.polyline.positions = new ConstantProperty(
-        coverage.isClosed && boundaryEndpoints.length > 0
-          ? [...boundaryEndpoints, boundaryEndpoints[0]]
-          : [Cartesian3.ZERO, Cartesian3.ZERO],
-      );
       entities.beamPerimeter.polyline.material = new ColorMaterialProperty(beamColor.withAlpha(0.9));
     }
-    entities.beamFaces.forEach((face, index) => {
-      if (!face.polygon || boundaryEndpoints.length < 3) return;
-      const firstIndex = Math.floor((index * boundaryEndpoints.length) / entities.beamFaces.length);
-      const secondIndex = Math.floor(
-        (((index + 1) % entities.beamFaces.length) * boundaryEndpoints.length) /
-          entities.beamFaces.length,
-      );
-      face.polygon.hierarchy = new ConstantProperty(
-        new PolygonHierarchy([
-          antennaPosition,
-          boundaryEndpoints[firstIndex],
-          boundaryEndpoints[secondIndex],
-        ]),
-      );
-      face.polygon.material = new ColorMaterialProperty(beamColor.withAlpha(antenna.beamOpacity * 0.3));
+    entities.beamFaces.forEach((face) => {
+      if (face.polygon) face.polygon.material = new ColorMaterialProperty(beamColor.withAlpha(antenna.beamOpacity * 0.3));
     });
-
     if (entities.footprint.polygon) {
-      entities.footprint.polygon.show = new ConstantProperty(coverage.isClosed);
-      entities.footprint.polygon.hierarchy = new ConstantProperty(
-        new PolygonHierarchy(
-          coverage.isClosed
-            ? coverage.vertices.map((vertex) => Cartesian3.fromElements(...vertex.pointEcefM))
-            : [Cartesian3.ZERO, Cartesian3.ZERO, Cartesian3.ZERO],
-        ),
-      );
       entities.footprint.polygon.material = new ColorMaterialProperty(beamColor.withAlpha(Math.min(0.65, antenna.beamOpacity * 1.8)));
       entities.footprint.polygon.outlineColor = new ConstantProperty(beamColor.withAlpha(0.95));
     }
-    const centerPoint = coverage.centerIntersection
-      ? Cartesian3.fromElements(...coverage.centerIntersection.pointEcefM)
-      : Cartesian3.ZERO;
-    entities.beamCenterPoint.position = new ConstantPositionProperty(centerPoint);
-    if (entities.beamCenterPoint.point) {
-      entities.beamCenterPoint.point.show = new ConstantProperty(
-        coverage.centerIntersection !== undefined,
-      );
+  }, [antenna.beamColor, antenna.beamOpacity, antenna.beamType, displaySettings.satelliteScale, paths]);
+
+  useEffect(() => {
+    const entities = entitiesRef.current;
+    if (!entities) return;
+    const customModelEnabled = displaySettings.satelliteModelUrl.trim().length > 0;
+    if (entities.satellite.point) entities.satellite.point.show = new ConstantProperty(!customModelEnabled);
+    if (entities.satellite.model) {
+      entities.satellite.model.show = new ConstantProperty(customModelEnabled);
+      if (customModelEnabled) entities.satellite.model.uri = new ConstantProperty(displaySettings.satelliteModelUrl);
+      entities.satellite.model.scale = new ConstantProperty(displaySettings.satelliteScale);
     }
-    const viewer = viewerRef.current;
-    if (viewer) viewer.clock.currentTime = JulianDate.fromDate(satellite.dateUtc);
-  }, [antenna, attitudeState, coverage, displaySettings.satelliteScale, paths, satellite]);
+    entities.satelliteParts.forEach((part) => { part.show = !customModelEnabled; });
+  }, [displaySettings.satelliteModelUrl, displaySettings.satelliteScale, paths]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
     if (!viewer) return;
     if (displaySettings.cameraMode === "free") {
       viewer.camera.lookAtTransform(Matrix4.IDENTITY);
-      return;
     }
-    const target = displaySettings.cameraMode === "satellite"
-      ? Cartesian3.fromElements(...satellite.positionEcefM)
-      : displaySettings.cameraMode === "beamCenter" && coverage.centerIntersection
-        ? Cartesian3.fromElements(...coverage.centerIntersection.pointEcefM)
-        : Cartesian3.fromDegrees(satellite.longitudeDeg, satellite.latitudeDeg, 100);
-    const rangeM = displaySettings.cameraMode === "satellite" ? 1_800_000 : 2_800_000;
-    viewer.camera.lookAt(target, new HeadingPitchRange(0, -0.55, rangeM));
-  }, [coverage.centerIntersection, displaySettings.cameraMode, satellite]);
+  }, [displaySettings.cameraMode]);
 
   useEffect(() => {
     const entities = entitiesRef.current;
@@ -1222,6 +1316,7 @@ export function GlobeViewer() {
     entities.beamFaces.forEach((entity) => { entity.show = displaySettings.showBeam; });
     entities.beamCenterPoint.show = displaySettings.showBeam;
     entities.footprint.show = displaySettings.showFootprint;
+    entities.coverageSwath.show = displaySettings.showHistory;
     for (const companion of companionEntitiesRef.current.values()) {
       companion.orbit.show = displaySettings.showOrbit;
       companion.groundTrack.show = displaySettings.showGroundTrack;
@@ -1231,7 +1326,34 @@ export function GlobeViewer() {
     for (const entity of targetEntitiesRef.current.values()) entity.show = displaySettings.showTargets;
     for (const entity of historyEntitiesRef.current.values()) entity.show = displaySettings.showHistory;
     for (const entity of unionEntitiesRef.current) entity.show = displaySettings.showHistory;
+    for (const entity of previewEntitiesRef.current) entity.show = displaySettings.showPreview;
   }, [displaySettings, paths]);
+
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+    for (const entity of previewEntitiesRef.current) viewer.entities.remove(entity);
+    previewEntitiesRef.current = [];
+    for (const sample of coveragePreview) {
+      const footprints = sample.beamFootprints?.length
+        ? sample.beamFootprints
+        : [{ beamId: "primary", beamName: "主波束", color: "#b37feb", verticesEcefM: sample.verticesEcefM }];
+      for (const footprint of footprints) {
+        if (footprint.verticesEcefM.length < 3) continue;
+        previewEntitiesRef.current.push(viewer.entities.add({
+          name: `${footprint.beamName} 未来覆盖预览 T+${sample.timeSeconds.toFixed(1)}s`,
+          polygon: {
+            hierarchy: new PolygonHierarchy(footprint.verticesEcefM.map((point) => Cartesian3.fromElements(...point))),
+            perPositionHeight: true,
+            material: Color.fromCssColorString(footprint.color).brighten(0.25, new Color()).withAlpha(0.12),
+            outline: true,
+            outlineColor: Color.fromCssColorString("#d3adf7").withAlpha(0.65),
+          },
+          show: displaySettings.showPreview,
+        }));
+      }
+    }
+  }, [coveragePreview, displaySettings.showPreview, paths]);
 
   useEffect(() => {
     const viewer = viewerRef.current;
