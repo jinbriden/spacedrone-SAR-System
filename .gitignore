@@ -4,3 +4,12 @@ dist/
 coverage/
 *.tsbuildinfo
 *.log
+/spacedrone-*.csv
+/spacedrone-*.geojson
+/spacedrone-*.png
+/spacedrone-*.json
+release/
+.hermes/
+*.asv
+matlab-processing/*.mat
+matlab-processing/output/

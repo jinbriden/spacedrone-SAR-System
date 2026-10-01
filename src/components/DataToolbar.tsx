@@ -1,4 +1,4 @@
-import { Alert, Button, Dropdown, Modal, Select, Space, Tooltip } from "antd";
+import { Alert, Button, Dropdown, Modal, Select, Space } from "antd";
 import { useMemo, useRef, useState } from "react";
 import { EXAMPLE_SCENES } from "../examples/exampleScenes";
 import { downloadTextFile, timestampedFileName } from "../io/browserFiles";
@@ -119,37 +119,59 @@ export function DataToolbar() {
     <div className="data-toolbar">
       {modalContext}
       <Space wrap size={[6, 6]}>
-        <Button size="small" onClick={() => modal.confirm({
-          title: "新建场景？",
-          content: "当前未保存的参数、目标和累计统计将被清除。",
-          okText: "新建",
-          cancelText: "取消",
-          onOk: () => {
-            newScene();
-            setFeedback({ type: "success", text: "已新建默认场景。" });
-          },
-        })}>新建场景</Button>
-        <Button size="small" onClick={save}>保存场景</Button>
-        <Button size="small" onClick={() => sceneInputRef.current?.click()}>加载场景</Button>
-        <Button size="small" onClick={() => targetInputRef.current?.click()}>导入目标</Button>
-        <Tooltip title="在 Web Worker 中采样一周轨道、波束中心和覆盖区">
-          <Button size="small" loading={exporting === "csv"} disabled={exporting !== undefined} onClick={() => void exportSimulation("csv")}>导出 CSV</Button>
-        </Tooltip>
-        <Tooltip title="导出地面航迹、波束中心轨迹和每个闭合覆盖多边形">
-          <Button size="small" loading={exporting === "geojson"} disabled={exporting !== undefined} onClick={() => void exportSimulation("geojson")}>导出 GeoJSON</Button>
-        </Tooltip>
         <Dropdown
           menu={{
-            items: EXAMPLE_SCENES.map((example) => ({ key: example.key, label: example.name })),
+            items: [
+              { key: "new", label: "新建场景" },
+              { key: "save", label: "保存场景" },
+              { key: "load", label: "加载场景" },
+              { key: "targets", label: "导入目标" },
+              {
+                key: "examples",
+                label: "示例场景",
+                children: EXAMPLE_SCENES.map((example) => ({ key: `example:${example.key}`, label: example.name })),
+              },
+            ],
             onClick: ({ key }) => {
-              const example = EXAMPLE_SCENES.find((item) => item.key === key);
-              if (!example) return;
-              loadScene(example.scene);
-              setFeedback({ type: "success", text: `已载入示例：${example.name}。${example.description}` });
+              if (key === "new") {
+                modal.confirm({
+                  title: "新建场景？",
+                  content: "当前未保存的参数、目标和累计统计将被清除。",
+                  okText: "新建",
+                  cancelText: "取消",
+                  onOk: () => {
+                    newScene();
+                    setFeedback({ type: "success", text: "已新建默认场景。" });
+                  },
+                });
+                return;
+              }
+              if (key === "save") { save(); return; }
+              if (key === "load") { sceneInputRef.current?.click(); return; }
+              if (key === "targets") { targetInputRef.current?.click(); return; }
+              if (key.startsWith("example:")) {
+                const example = EXAMPLE_SCENES.find((item) => item.key === key.slice("example:".length));
+                if (!example) return;
+                loadScene(example.scene);
+                setFeedback({ type: "success", text: `已载入示例：${example.name}。${example.description}` });
+              }
             },
           }}
         >
-          <Button size="small">示例场景</Button>
+          <Button size="small">文件</Button>
+        </Dropdown>
+        <Dropdown
+          menu={{
+            items: [
+              { key: "csv", label: "导出 CSV", disabled: exporting !== undefined },
+              { key: "geojson", label: "导出 GeoJSON", disabled: exporting !== undefined },
+            ],
+            onClick: ({ key }) => {
+              if (key === "csv" || key === "geojson") void exportSimulation(key);
+            },
+          }}
+        >
+          <Button size="small" loading={exporting !== undefined}>导出</Button>
         </Dropdown>
         <Select
           size="small"
@@ -175,6 +197,7 @@ export function DataToolbar() {
           okText: "知道了",
           content: (
             <div className="help-content">
+              <p>左侧工作区按轨道、姿态、目标、任务、SAR、显示分组；再点一次当前分组可收起参数栏。地球两侧箭头可单独折叠左右栏。</p>
               <p>拖动/滚轮控制地球；单击读取经纬高，双击定位；点击卫星进入跟随视角。</p>
               <p>轨道参数点击“应用并重新初始化”后生效，姿态、天线与显示参数实时生效。</p>
               <p>多星编队从主星克隆伴飞星；伴飞星轨道独立传播，重访分析同时给出逐星和星座联合窗口。</p>

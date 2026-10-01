@@ -12,22 +12,25 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .app-shell {
   height: 100%;
   display: grid;
-  grid-template-rows: 108px minmax(0, 1fr) 86px;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   background: #020711;
 }
 
 .topbar {
   display: grid;
-  grid-template-columns: auto 1fr;
+  grid-template-columns: minmax(180px, auto) minmax(0, 1fr);
   align-items: center;
-  padding: 9px 20px;
+  gap: 8px 16px;
+  padding: 8px 16px;
   border-bottom: 1px solid #17344d;
   background: linear-gradient(90deg, #071827, #0a2237);
 }
 
-.topbar h3 { margin: 0; font-size: 20px; }
+.topbar h3 { margin: 0; font-size: 16px; }
+.topbar-title { min-width: 0; }
+.topbar-title .ant-typography { margin-bottom: 0; }
 .model-badge { justify-self: end; color: #8ed9f8; font-size: 12px; letter-spacing: 0.05em; }
-.data-toolbar { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; min-width: 0; }
+.data-toolbar { display: flex; align-items: center; gap: 10px; min-width: 0; justify-self: end; flex-wrap: wrap; }
 .toolbar-feedback { flex: 1; min-width: 220px; padding-block: 3px !important; }
 .toolbar-feedback .ant-alert-message { font-size: 12px; }
 .help-content { display: grid; gap: 6px; }
@@ -37,7 +40,42 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .workspace {
   min-height: 0;
   display: grid;
-  grid-template-columns: 284px minmax(360px, 1fr) 320px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+}
+
+.workspace-left {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+
+.workspace-rail {
+  width: 52px;
+  flex: 0 0 52px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 6px;
+  background: #06101c;
+  border-right: 1px solid #17344d;
+}
+
+.workspace-rail-button {
+  height: 48px;
+  padding: 0 2px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: #8ed9f8;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.workspace-rail-button:hover { background: #0d2233; }
+.workspace-rail-button.active {
+  color: #fff;
+  border-color: #25a7d9;
+  background: #0d2a40;
 }
 
 .sidebar {
@@ -47,8 +85,41 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
   scrollbar-width: thin;
 }
 
-.left-sidebar { border-right: 1px solid #17344d; }
-.right-sidebar { border-left: 1px solid #17344d; }
+.left-sidebar {
+  width: 300px;
+  border-right: 1px solid #17344d;
+}
+
+.left-sidebar > div:not([hidden]) {
+  display: grid;
+  gap: 18px;
+}
+
+.right-sidebar {
+  width: 320px;
+  border-left: 1px solid #17344d;
+}
+
+.left-sidebar[hidden],
+.right-sidebar[hidden] {
+  display: none !important;
+}
+
+.sidebar-edge-toggle {
+  position: absolute;
+  top: 50%;
+  z-index: 6;
+  width: 18px;
+  height: 56px;
+  transform: translateY(-50%);
+  border: 1px solid #31566f;
+  background: rgb(3 17 29 / 88%);
+  color: #8ed9f8;
+  cursor: pointer;
+}
+
+.sidebar-edge-toggle.left { left: 0; border-left: 0; border-radius: 0 6px 6px 0; }
+.sidebar-edge-toggle.right { right: 0; border-right: 0; border-radius: 6px 0 0 6px; }
 .panel-section h4 { margin: 0 0 6px; }
 .parameter-form { margin-top: 18px; }
 .parameter-form .ant-form-item { margin-bottom: 12px; }
@@ -99,6 +170,7 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .legend-swatch { display: inline-block; width: 24px; height: 9px; border: 1px solid #87e8de; }
 .legend-swatch.footprint { background: rgb(19 194 194 / 42%); }
 .legend-swatch.history { background: rgb(54 207 201 / 10%); }
+.legend-swatch.preview { border-color: #d3adf7; background: rgb(179 127 235 / 18%); }
 
 .status-panel .ant-descriptions-item-label {
   color: #6fb5d3;
@@ -136,10 +208,10 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .timeline {
   display: grid;
   grid-template-columns: auto minmax(180px, 1fr) auto;
-  gap: 18px;
+  gap: 12px;
   align-items: center;
   justify-content: center;
-  padding: 10px 20px;
+  padding: 8px 16px;
   border-top: 1px solid #17344d;
   background: #071522;
 }
@@ -150,6 +222,11 @@ html, body, #root { width: 100%; height: 100%; margin: 0; overflow: hidden; }
 .elapsed-time { min-width: 118px; font-family: "Cascadia Mono", Consolas, monospace; }
 
 @media (max-width: 1050px) {
-  .workspace { grid-template-columns: 250px minmax(320px, 1fr); }
-  .right-sidebar { display: none; }
+  .timeline {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 4px;
+    padding: 6px 12px 8px;
+  }
+  .timeline-controls, .timeline-range-inputs { justify-self: center; }
+  .timeline-scrubber { width: 100%; padding: 0 12px; }
 }

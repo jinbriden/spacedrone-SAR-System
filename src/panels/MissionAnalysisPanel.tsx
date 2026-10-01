@@ -5,6 +5,8 @@ import { revisitAnalysisToCsv } from "../io/revisitExport";
 import { useSimulationStore } from "../stores/simulationStore";
 import { runRevisitAnalysisWorker } from "../workers/revisitWorkerClient";
 import type { RevisitAnalysisResult } from "../workers/revisitAnalysis";
+import { runSimulationSamplingWorker } from "../workers/simulationWorkerClient";
+import { DEG_TO_RAD, geodeticToEcef } from "@spacedrone/orbital-core";
 
 const { Text, Title } = Typography;
 const secondsOrDash = (value: number | undefined) => value === undefined ? "—" : `${value.toFixed(1)} s`;
@@ -18,14 +20,22 @@ export function MissionAnalysisPanel() {
   const terrain = useSimulationStore((state) => state.terrain);
   const settings = useSimulationStore((state) => state.missionSettings);
   const updateSettings = useSimulationStore((state) => state.updateMissionSettings);
+  const preview = useSimulationStore((state) => state.coveragePreview);
+  const setCoveragePreview = useSimulationStore((state) => state.setCoveragePreview);
+  const clearCoveragePreview = useSimulationStore((state) => state.clearCoveragePreview);
+  const [previewRunning, setPreviewRunning] = useState(false);
+  const [previewError, setPreviewError] = useState<string>();
   const [running, setRunning] = useState(false);
   const [result, setResult] = useState<RevisitAnalysisResult>();
   const [error, setError] = useState<string>();
   const [selectedTargetId, setSelectedTargetId] = useState<string>();
   const invalidRange = settings.revisitEndSeconds <= settings.revisitStartSeconds;
+  const invalidPreviewRange = settings.previewEndSeconds <= settings.previewStartSeconds;
+  const previewSampleCount = invalidPreviewRange ? 0 : Math.floor((settings.previewEndSeconds - settings.previewStartSeconds) / settings.previewStepSeconds) + 1;
   const invalidTolerance = settings.revisitTransitionToleranceSeconds > settings.revisitSampleStepSeconds;
 
   useEffect(() => { setResult(undefined); setError(undefined); }, [orbit, attitude, antenna, companionSatellites, targets, terrain, settings.revisitStartSeconds, settings.revisitEndSeconds, settings.revisitSampleStepSeconds, settings.revisitTransitionToleranceSeconds]);
+  useEffect(() => { clearCoveragePreview(); }, [antenna, attitude, clearCoveragePreview, orbit, targets, terrain]);
   const selected = useMemo(() => result?.targets.find((target) => target.targetId === selectedTargetId) ?? result?.targets[0], [result, selectedTargetId]);
 
   const run = async () => {
@@ -44,9 +54,58 @@ export function MissionAnalysisPanel() {
     } finally { setRunning(false); }
   };
 
+  const runCoveragePreview = async () => {
+    setPreviewRunning(true); setPreviewError(undefined);
+    try {
+      if (previewSampleCount < 2 || previewSampleCount > 10_000) throw new Error("覆盖预览采样点必须为 2～10000；请缩短时间范围或增大步长。");
+      const endSeconds = settings.previewStartSeconds + (previewSampleCount - 1) * settings.previewStepSeconds;
+      const sampled = await runSimulationSamplingWorker({
+        orbit, attitude, antenna, targets, terrain,
+        includeCoverage: true,
+        startSeconds: settings.previewStartSeconds,
+        endSeconds,
+        sampleCount: previewSampleCount,
+      });
+      setCoveragePreview(sampled.samples.flatMap((sample) => {
+        const beamFootprints = (sample.beams ?? []).flatMap((beam) => beam.vertices?.length ? [{
+          beamId: beam.beamId,
+          beamName: beam.beamName,
+          color: beam.color,
+          verticesEcefM: beam.vertices.map((point) => geodeticToEcef({
+            longitudeRad: point.longitudeDeg * DEG_TO_RAD,
+            latitudeRad: point.latitudeDeg * DEG_TO_RAD,
+            altitudeM: point.altitudeM,
+          })),
+        }] : []);
+        if (beamFootprints.length === 0) return [];
+        return [{
+          timeSeconds: sample.timeSeconds,
+          verticesEcefM: beamFootprints[0].verticesEcefM,
+          beamFootprints,
+        }];
+      }));
+    } catch (cause) {
+      setPreviewError(cause instanceof Error ? cause.message : "扫描覆盖预览失败。");
+    } finally { setPreviewRunning(false); }
+  };
+
   return <section className="panel-section mission-analysis-panel">
     <Title level={4}>可见性与重访分析</Title>
     <Text type="secondary">粗采样发现状态变化，再按容差二分细化访问窗口边界。</Text>
+    <Title level={5}>扫描覆盖预览</Title>
+    <Text type="secondary">按当前轨道、姿态、任务扫描规律、全部启用波束和地形参数在后台预计算，不需要先播放时间轴。</Text>
+    <Form layout="vertical" size="small" className="parameter-form">
+      <Form.Item label="预览起始时间 (s)"><InputNumber min={0} value={settings.previewStartSeconds} onChange={(previewStartSeconds) => previewStartSeconds !== null && updateSettings({ previewStartSeconds })} /></Form.Item>
+      <Form.Item label="预览结束时间 (s)" validateStatus={invalidPreviewRange ? "error" : undefined}><InputNumber min={0} value={settings.previewEndSeconds} onChange={(previewEndSeconds) => previewEndSeconds !== null && updateSettings({ previewEndSeconds })} /></Form.Item>
+      <Form.Item label="预览采样步长 (s)"><InputNumber min={0.01} value={settings.previewStepSeconds} onChange={(previewStepSeconds) => previewStepSeconds !== null && updateSettings({ previewStepSeconds })} /></Form.Item>
+      <Space wrap>
+        <Button type="primary" loading={previewRunning} disabled={invalidPreviewRange || previewSampleCount > 10_000} onClick={() => void runCoveragePreview()}>生成未来覆盖预览</Button>
+        <Button disabled={preview.length === 0} onClick={clearCoveragePreview}>清除预览</Button>
+      </Space>
+    </Form>
+    <Text type="secondary">预计采样 {previewSampleCount.toLocaleString()} 点；当前显示 {preview.length.toLocaleString()} 个有效覆盖时刻。</Text>
+    {previewError && <Alert type="error" showIcon title="预览失败" description={previewError} />}
+    <Title level={5}>可见性与重访</Title>
     <Alert type="warning" showIcon title="采样分辨率约束" description="短于粗采样步长且未命中采样时刻的访问窗口可能漏检；窄波束分析请减小步长。边界容差只约束已检测窗口的进入/离开时刻。" />
     <Form layout="vertical" size="small" className="parameter-form">
       <Form.Item label="分析起始时间 (s)"><InputNumber min={0} value={settings.revisitStartSeconds} onChange={(value) => value !== null && updateSettings({ revisitStartSeconds: value })} /></Form.Item>

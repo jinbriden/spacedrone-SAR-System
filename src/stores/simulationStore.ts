@@ -168,6 +168,9 @@ export interface MissionSettings {
   historySampleIntervalSeconds: number;
   maxHistoryFootprints: number;
   historyDisplayMode: "footprints" | "union";
+  previewStartSeconds: number;
+  previewEndSeconds: number;
+  previewStepSeconds: number;
   revisitStartSeconds: number;
   revisitEndSeconds: number;
   revisitSampleStepSeconds: number;
@@ -207,6 +210,8 @@ export interface DisplaySettings {
   showFootprint: boolean;
   showTargets: boolean;
   showHistory: boolean;
+  showPreview: boolean;
+  baseMapMode: "offline" | "onlineImagery";
   satelliteScale: number;
   satelliteModelUrl: string;
   cameraMode: "free" | "satellite" | "subpoint" | "beamCenter";
@@ -285,6 +290,7 @@ interface SimulationStore {
   targetDraft: TargetDraft;
   targetPasses: Record<string, TargetPassState>;
   coverageHistory: CoverageHistorySample[];
+  coveragePreview: CoverageHistorySample[];
   coverageUnion: CoverageUnionGeometry;
   missionSettings: MissionSettings;
   timelineSettings: TimelineSettings;
@@ -319,6 +325,8 @@ interface SimulationStore {
   processMissionSamples: (samples: MissionSampleRecord[]) => void;
   resetMissionData: () => void;
   clearCoverageHistory: () => void;
+  setCoveragePreview: (samples: CoverageHistorySample[]) => void;
+  clearCoveragePreview: () => void;
   loadScene: (scene: SceneSnapshot) => void;
   newScene: () => void;
   applyOrbit: () => void;
@@ -418,6 +426,9 @@ export const defaultMissionSettings: MissionSettings = {
   historySampleIntervalSeconds: 10,
   maxHistoryFootprints: 240,
   historyDisplayMode: "footprints",
+  previewStartSeconds: 0,
+  previewEndSeconds: 6000,
+  previewStepSeconds: 30,
   revisitStartSeconds: 0,
   revisitEndSeconds: 86_400,
   revisitSampleStepSeconds: 5,
@@ -454,6 +465,8 @@ export const defaultDisplaySettings: DisplaySettings = {
   showFootprint: true,
   showTargets: true,
   showHistory: true,
+  showPreview: true,
+  baseMapMode: "onlineImagery",
   satelliteScale: 1,
   satelliteModelUrl: "",
   cameraMode: "free",
@@ -555,6 +568,7 @@ export const useSimulationStore = create<SimulationStore>((set) => ({
   targetDraft: defaultTargetDraft,
   targetPasses: {},
   coverageHistory: [],
+  coveragePreview: [],
   coverageUnion: [],
   missionSettings: defaultMissionSettings,
   timelineSettings: defaultTimelineSettings,
@@ -759,8 +773,10 @@ export const useSimulationStore = create<SimulationStore>((set) => ({
       }
       return { targetPasses, coverageHistory, coverageUnion };
     }),
-  resetMissionData: () => set({ targetPasses: {}, coverageHistory: [], coverageUnion: [] }),
+  resetMissionData: () => set({ targetPasses: {}, coverageHistory: [], coverageUnion: [], coveragePreview: [] }),
   clearCoverageHistory: () => set({ coverageHistory: [], coverageUnion: [] }),
+  setCoveragePreview: (coveragePreview) => set({ coveragePreview }),
+  clearCoveragePreview: () => set({ coveragePreview: [] }),
   loadScene: (scene) =>
     set({
       orbit: { ...scene.orbit },
@@ -794,6 +810,7 @@ export const useSimulationStore = create<SimulationStore>((set) => ({
           verticesEcefM: beam.verticesEcefM.map((point) => [...point] as Vector3),
         })),
       })),
+      coveragePreview: [],
       coverageUnion: scene.missionSettings.historyDisplayMode === "union"
         ? buildUnionFromHistory(scene.coverageHistory)
         : [],
@@ -820,6 +837,7 @@ export const useSimulationStore = create<SimulationStore>((set) => ({
       pickedLocation: undefined,
       targetPasses: {},
       coverageHistory: [],
+      coveragePreview: [],
       coverageUnion: [],
       sceneRevision: useSimulationStore.getState().sceneRevision + 1,
     }),
@@ -830,6 +848,7 @@ export const useSimulationStore = create<SimulationStore>((set) => ({
       playing: false,
       targetPasses: {},
       coverageHistory: [],
+      coveragePreview: [],
       coverageUnion: [],
     })),
   setPlaying: (playing) => set({ playing }),

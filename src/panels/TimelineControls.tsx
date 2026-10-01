@@ -47,7 +47,7 @@ export function TimelineControls() {
           step={0.1}
           value={elapsedSeconds}
           tooltip={{ formatter: (value) => `T + ${value?.toFixed(1)} s` }}
-          onChangeComplete={setElapsedSeconds}
+          onChange={setElapsedSeconds}
         />
       </div>
       <Space.Compact size="small" className="timeline-range-inputs">

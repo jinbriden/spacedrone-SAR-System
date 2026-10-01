@@ -1,4 +1,5 @@
-import { Button, Input, InputNumber, Space, Switch, Typography } from "antd";
+import { Button, Input, InputNumber, Select, Space, Switch, Typography } from "antd";
+import { isGltfFileName } from "../io/modelFile";
 import { useSimulationStore, type DisplaySettings } from "../stores/simulationStore";
 
 const { Title } = Typography;
@@ -20,6 +21,7 @@ const layers: Array<{ key: BooleanDisplayKey; label: string }> = [
   { key: "showFootprint", label: "瞬时覆盖区" },
   { key: "showTargets", label: "地面目标" },
   { key: "showHistory", label: "累计扫描带" },
+  { key: "showPreview", label: "未来覆盖预览" },
 ];
 
 export function DisplayPanel() {
@@ -27,7 +29,7 @@ export function DisplayPanel() {
   const update = useSimulationStore((state) => state.updateDisplaySettings);
   const loadLocalModel = (file: File | undefined) => {
     if (!file) return;
-    if (!/\\.(gltf|glb)$/i.test(file.name)) return;
+    if (!isGltfFileName(file.name)) return;
     const reader = new FileReader();
     reader.onload = () => {
       if (typeof reader.result === "string") update({ satelliteModelUrl: reader.result });
@@ -38,6 +40,19 @@ export function DisplayPanel() {
     <section className="panel-section display-panel">
       <Title level={4}>显示图层</Title>
       <Space orientation="vertical" size={6} className="full-width-space">
+        <label className="display-toggle">
+          <span>地球底图</span>
+          <Select
+            size="small"
+            style={{ width: 150 }}
+            value={settings.baseMapMode}
+            options={[
+              { value: "onlineImagery", label: "在线高清影像" },
+              { value: "offline", label: "离线 Natural Earth" },
+            ]}
+            onChange={(baseMapMode) => update({ baseMapMode })}
+          />
+        </label>
         {layers.map(({ key, label }) => (
           <label className="display-toggle" key={key}>
             <span>{label}</span>
